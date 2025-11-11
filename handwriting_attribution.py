@@ -1,9 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Нейросеть для атрибуции рукописей по фотографиям
-Автор: AI Assistant
-"""
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -80,12 +74,10 @@ class EarlyStopping:
                     if self.verbose:
                         print("Восстановлены лучшие веса модели")
     
-    def save_checkpoint(self, model):
-        """Сохранение лучших весов модели"""
+    def save_checkpoint(self, model): # Сохранение лучших весов модели
         self.best_weights = copy.deepcopy(model.state_dict())
 
-class HandwritingDataset(Dataset):
-    """Датасет для рукописей"""
+class HandwritingDataset(Dataset): #Датасет для рукописей
     
     def __init__(self, image_paths, labels, transform=None, albumentations_transform=None):
         self.image_paths = image_paths
@@ -112,8 +104,7 @@ class HandwritingDataset(Dataset):
         label = self.labels[idx]
         return image, label
 
-class HandwritingCNN(nn.Module):
-    """CNN модель для анализа почерка с поддержкой различных архитектур"""
+class HandwritingCNN(nn.Module): # CNN модель для анализа почерка с поддержкой различных архитектур
     
     def __init__(self, num_classes, architecture='resnet50', pretrained=True):
         super(HandwritingCNN, self).__init__()
@@ -158,8 +149,7 @@ class HandwritingCNN(nn.Module):
         else:
             return self.backbone(x)
 
-class HandwritingAttribution:
-    """Основной класс для атрибуции рукописей"""
+class HandwritingAttribution: # Основной класс для атрибуции рукописей
     
     def __init__(self, num_classes, architecture='resnet50', device='cuda' if torch.cuda.is_available() else 'cpu'):
         self.device = device
@@ -169,8 +159,7 @@ class HandwritingAttribution:
         self.label_to_author = {}
         self.author_to_label = {}
         
-    def preprocess_image(self, image_path):
-        """Предобработка изображения рукописи"""
+    def preprocess_image(self, image_path): # Предобработка изображения рукописи
         # Загружаем изображение
         image = cv2.imread(image_path)
         if image is None:
@@ -197,8 +186,7 @@ class HandwritingAttribution:
         # Возвращаем RGB изображение
         return cv2.cvtColor(binary, cv2.COLOR_GRAY2RGB)
     
-    def create_albumentations_transforms(self):
-        """Создание мощных трансформаций с Albumentations"""
+    def create_albumentations_transforms(self): # Создание мощных трансформаций с Albumentations
         if not ALBUMENTATIONS_AVAILABLE:
             return None, None
         
@@ -233,8 +221,7 @@ class HandwritingAttribution:
         
         return train_transform, val_transform
     
-    def create_data_transforms(self):
-        """Создание трансформаций для обучения (стандартные)"""
+    def create_data_transforms(self): # Создание трансформаций для обучения (стандартные)
         train_transform = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.RandomRotation(15),
@@ -255,8 +242,7 @@ class HandwritingAttribution:
         
         return train_transform, val_transform
     
-    def load_dataset(self, data_dir):
-        """Загрузка датасета из папки"""
+    def load_dataset(self, data_dir):  # Загрузка датасета из папки
         image_paths = []
         labels = []
         
@@ -278,8 +264,8 @@ class HandwritingAttribution:
         
         return image_paths, labels
     
-    def create_weighted_sampler(self, labels):
-        """Создание взвешенного семплера для борьбы с дисбалансом классов"""
+    def create_weighted_sampler(self, labels):  # Создание взвешенного семплера для борьбы с дисбалансом классов
+       
         # Подсчитываем количество образцов для каждого класса
         class_counts = Counter(labels)
         total_samples = len(labels)
@@ -315,8 +301,8 @@ class HandwritingAttribution:
         return sampler
     
     def train(self, data_dir, epochs=30, batch_size=4, learning_rate=0.0001, 
-              patience=7, use_albumentations=True, architecture='resnet50'):
-        """Обучение модели с продвинутыми техниками"""
+              patience=7, use_albumentations=True, architecture='resnet50'): # Обучение модели с продвинутыми техниками
+        
         print(f"=== Запуск обучения с архитектурой {architecture} ===")
         
         # Пересоздаем модель с новой архитектурой если нужно
@@ -379,8 +365,8 @@ class HandwritingAttribution:
         
         print(f"\n=== Начинаем обучение на {epochs} эпох с терпением {patience} ===\n")
         
-        for epoch in range(epochs):
-            # Обучение
+        for epoch in range(epochs): # Обучение
+            
             self.model.train()
             train_loss = 0.0
             
@@ -470,8 +456,7 @@ class HandwritingAttribution:
         
         return train_losses, val_accuracies, val_losses
     
-    def predict(self, image_path, top_k=3):
-        """Предсказание авторства рукописи"""
+    def predict(self, image_path, top_k=3):  # Предсказание авторства рукописи
         self.model.eval()
         
         # Предобработка изображения
@@ -504,22 +489,19 @@ class HandwritingAttribution:
         
         return results
     
-    def save_model(self, path):
-        """Сохранение модели"""
+    def save_model(self, path): # Сохранение модели
         torch.save({
             'model_state_dict': self.model.state_dict(),
             'num_classes': self.num_classes
         }, path)
         print(f"Модель сохранена в {path}")
     
-    def load_model(self, path):
-        """Загрузка модели"""
+    def load_model(self, path): # Загрузка модели
         checkpoint = torch.load(path, map_location=self.device)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         print(f"Модель загружена из {path}")
     
-    def save_labels(self, path):
-        """Сохранение меток авторов"""
+    def save_labels(self, path): # Сохранение меток авторов
         with open(path, 'w', encoding='utf-8') as f:
             json.dump({
                 'label_to_author': self.label_to_author,
@@ -527,16 +509,14 @@ class HandwritingAttribution:
             }, f, ensure_ascii=False, indent=2)
         print(f"Метки сохранены в {path}")
     
-    def load_labels(self, path):
-        """Загрузка меток авторов"""
+    def load_labels(self, path): # Загрузка меток авторов
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
             self.label_to_author = {int(k): v for k, v in data['label_to_author'].items()}
             self.author_to_label = data['author_to_label']
         print(f"Метки загружены из {path}")
     
-    def evaluate_model_detailed(self, val_loader, val_dataset):
-        """Подробная оценка модели с classification_report и confusion matrix"""
+    def evaluate_model_detailed(self, val_loader, val_dataset):  # Подробная оценка модели с classification_report и confusion matrix
         self.model.eval()
         
         all_predictions = []
@@ -561,7 +541,7 @@ class HandwritingAttribution:
                 print(classification_report(
                     all_true_labels,
                     all_predictions,
-                    labels=all_possible_labels,  # <-- ВОТ ИСПРАВЛЕНИЕ
+                    labels=all_possible_labels, 
                     target_names=author_names,
                     digits=3,
                     zero_division=0  # Добавляем это, чтобы избежать предупреждений для классов без примеров
@@ -573,10 +553,10 @@ class HandwritingAttribution:
                     f.write(classification_report(
                         all_true_labels,
                         all_predictions,
-                        labels=all_possible_labels,  # <-- И ЗДЕСЬ ТОЖЕ
+                        labels=all_possible_labels,  
                         target_names=author_names,
                         digits=3,
-                        zero_division=0  # И здесь
+                        zero_division=0 
                     ))
         
         # Confusion Matrix
@@ -589,9 +569,8 @@ class HandwritingAttribution:
         
         return all_predictions, all_true_labels
     
-    def plot_confusion_matrix(self, cm, class_names):
-        """Построение и сохранение матрицы ошибок"""
-        plt.figure(figsize=(12, 10))
+    def plot_confusion_matrix(self, cm, class_names):  # Построение и сохранение матрицы ошибок
+       plt.figure(figsize=(12, 10))
         
         # Нормализованная матрица ошибок (в процентах)
         cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
@@ -642,8 +621,7 @@ class HandwritingAttribution:
         
         plt.show()
     
-    def plot_training_history_extended(self, train_losses, val_accuracies, val_losses):
-        """Расширенное построение графиков обучения"""
+    def plot_training_history_extended(self, train_losses, val_accuracies, val_losses): # Расширенное построение графиков обучения
         fig, axes = plt.subplots(2, 2, figsize=(15, 10))
         
         # График потерь обучения
@@ -693,8 +671,7 @@ class HandwritingAttribution:
         print("Расширенные графики обучения сохранены: training_history_extended.png")
         plt.show()
     
-    def plot_training_history(self, train_losses, val_accuracies):
-        """Построение графика обучения (обратная совместимость)"""
+    def plot_training_history(self, train_losses, val_accuracies): # Построение графика обучения (обратная совместимость)
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
         
         ax1.plot(train_losses)
@@ -711,8 +688,7 @@ class HandwritingAttribution:
         plt.savefig('training_history.png')
         plt.show()
 
-def create_sample_dataset():
-    """Создание примера структуры датасета"""
+def create_sample_dataset(): # Создание примера структуры датасета
     sample_structure = """
     Структура папки с данными:
     data/
@@ -737,9 +713,9 @@ if __name__ == "__main__":
     create_sample_dataset()
     
     # Инициализация модели (замените на реальное количество авторов)
-    num_authors = 8  # Количество авторов в вашем датасете
+    num_authors = 8 
     attribution_model = HandwritingAttribution(num_authors)
     
     print(f"\nМодель инициализирована для {num_authors} авторов")
     print("Для обучения используйте: attribution_model.train('path/to/data')")
-    print("Для предсказания используйте: attribution_model.predict('path/to/image.jpg')")
+    print("Для предсказания используйте: attribution_model.predict('path/to/image.jpg')") # ЕЕЕБАДИИИИ ПОЛУЧИЛООСЬ
