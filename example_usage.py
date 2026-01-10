@@ -1,129 +1,170 @@
 from handwriting_attribution import HandwritingAttribution
 import os
 import sys
+import json
+import subprocess
+import platform
+import time
 
-def run_training(): # Запускает процесс обучения модели
-    print("\n" + "-" * 20 + " Обучение новой модели " + "-" * 20)
+# Константы имен файлов
+MODEL_FILENAME = 'handwriting_modelUp_best.pth'
+LABELS_FILENAME = 'labelsUp.json'
 
-    # Шаг 1: Проверка данных и получение количества авторов
+
+def open_file_auto(path):
+    """
+    Магия для преподавателя: файл открывается сам.
+    """
+    try:
+        if platform.system() == "Windows":
+            os.startfile(path)
+        elif platform.system() == "Darwin":  # macOS
+            subprocess.call(["open", path])
+        else:  # Linux
+            subprocess.call(["xdg-open", path])
+    except Exception as e:
+        print(f"[Warning] Не удалось открыть файл автоматически: {e}")
+
+
+def run_training():
+    """Запускает процесс обучения модели."""
+    print("\n" + "=" * 50)
+    print("   МОДУЛЬ ОБУЧЕНИЯ (K-FOLD DEEP LEARNING)")
+    print("=" * 50)
+
     data_dir = 'data/'
     if not os.path.isdir(data_dir):
-        print(f"\n[ОШИБКА] Папка '{data_dir}' для обучения не найдена. Пожалуйста, создайте ее.")
+        print(f"\n[ОШИБКА] Папка '{data_dir}' не найдена!")
+        try:
+            os.makedirs(data_dir)
+            print(f"   >>> Создана пустая папка '{data_dir}'. Положите туда папки с авторами!")
+        except:
+            pass
         return
 
+    # Проверка структуры
     authors = [d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))]
     if len(authors) < 2:
-        print(f"\n[ОШИБКА] В папке '{data_dir}' найдено менее 2 авторов. Обучение невозможно.")
+        print(f"\n[ОШИБКА] Найдено авторов: {len(authors)}. Для обучения нужно минимум 2.")
+        print(f"   (Положите папки с картинками в '{data_dir}')")
         return
 
-    num_authors = len(authors)
-    print(f"\n[INFO] Найдено {num_authors} авторов. Начинаем подготовку к обучению...")
+    print(f"\n[INFO] Обнаружены классы: {authors}")
 
-    # Шаг 2: Получение параметров обучения от пользователя
+    # Настройки для Демо-режима
+    print("\n--- Параметры обучения (Enter = Авто) ---")
     try:
-        epochs = int(input(f"   Введите количество эпох: "))
-        batch_size = int(
-            input(f"   Введите размер пакета: "))
-        learning_rate = float(input(f"   Введите скорость обучения: "))
+        k_in = input("   K-Folds (Кросс-валидация) [3]: ").strip()
+        k_folds = int(k_in) if k_in else 3  # 3 фолда достаточно для демо
+
+        ep_in = input("   Эпохи на фолд [15]: ").strip()
+        epochs = int(ep_in) if ep_in else 15
     except ValueError:
-        print("\n[ОШИБКА] Неверный ввод. Пожалуйста, вводите только числа.")
-        return
+        print("[!] Ошибка ввода. Используем стандартные значения.")
+        k_folds, epochs = 3, 15
 
-    # Шаг 3: Вызов функции обучения из основного класса
-    print("\n[INFO] Инициализация модели и запуск обучения...")
-    model = HandwritingAttribution(num_authors)
-    model.train(
-        data_dir=data_dir,
-        epochs=epochs,
-        batch_size=batch_size,
-        learning_rate=learning_rate
-    )
-
-    print("\n[SUCCESS] Обучение успешно завершено!")
-    print(f"[INFO] Модель сохранена в 'handwriting_model.pth', метки в 'labels.json'.")
-
-
-def run_prediction(): # Запускает процесс предсказания на основе обученной модели
-    
-
-    print("\n" + "-" * 20 + " Предсказание по изображению " + "-" * 20)
-
-    # Шаг 1: Проверка наличия файлов модели
-    model_path = 'handwriting_modelUp.pth'
-    labels_path = 'labelsUp.json'
-    if not (os.path.exists(model_path) and os.path.exists(labels_path)):
-        print(f"\n[ОШИБКА] Файлы '{model_path}' или '{labels_path}' не найдены.")
-        print("[INFO] Сначала необходимо обучить модель, выбрав опцию '1'.")
-        return
-
-    # Шаг 2: Инициализация и загрузка модели
+    # Запуск
+    print(f"\n[STATUS] Запуск K-Fold валидации (k={k_folds})...")
     try:
-        # Загружаем метки, чтобы узнать кол-во классов для инициализации модели
-        with open(labels_path, 'r', encoding='utf-8') as f:
-            import json
-            num_authors = len(json.load(f)['author_to_label'])
+        # Инициализируем пустой класс, он сам всё загрузит внутри train
+        model = HandwritingAttribution(device='cuda' if 0 else 'cpu')
+        # Если есть GPU, PyTorch сам найдет, но тут для надежности
 
-        print(f"\n[INFO] Загрузка модели, обученной для {num_authors} авторов...")
-        # Инициализируем класс с правильным количеством авторов
-        model = HandwritingAttribution(num_authors)
-        # Вызываем функции загрузки из основного класса
-        model.load_labels(labels_path)
-        model.load_model(model_path)
-        print("[OK] Модель и метки успешно загружены.")
+        model.train(
+            data_dir,
+            k_folds=k_folds,
+            epochs=epochs,
+            batch_size=4,
+            learning_rate=0.0001
+        )
+        print("\n[SUCCESS] ✔ Модель успешно обучена и сохранена.")
+
     except Exception as e:
-        print(f"\n[ОШИБКА] Не удалось загрузить модель: {e}")
+        print(f"\n[CRITICAL] Ошибка обучения: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def run_prediction():
+    """Запускает процесс экспертизы."""
+    print("\n" + "=" * 50)
+    print("   МОДУЛЬ ЭКСПЕРТИЗЫ (ZENITH FORENSICS)")
+    print("=" * 50)
+
+    if not (os.path.exists(MODEL_FILENAME) and os.path.exists(LABELS_FILENAME)):
+        print(f"\n[ОШИБКА] Файлы модели не найдены.")
+        print("   >>> Сначала выполните обучение (пункт 1).")
         return
 
-    # Шаг 3: Получение пути к изображению и запуск предсказания
-    image_path = input("   Введите путь к изображению для анализа: ").strip().replace('"', '')
-    if not os.path.exists(image_path):
-        print(f"\n[ОШИБКА] Изображение по пути '{image_path}' не найдено.")
-        return
-
-    # Вызываем функцию предсказания из основного класса
+    # 1. Загрузка конфигурации
     try:
-        results = model.predict(image_path, top_k=8)
-        print("\n   [РЕЗУЛЬТАТ] Наиболее вероятные авторы:")
-        for i, result in enumerate(results, 1):
-            print(f"      {i}. Автор: {result['author']:<25} | Уверенность: {result['confidence']:.1f}%")
+        model = HandwritingAttribution()
+        model.load_labels(LABELS_FILENAME)
+        model.load_model(MODEL_FILENAME)  # Здесь модель инициализируется под нужное число классов
+        print(f"[INFO] Система готова. Классов в базе: {model.num_classes}")
+
     except Exception as e:
-        print(f"\n[ОШИБКА] Произошла ошибка во время анализа: {e}")
+        print(f"[ОШИБКА] Сбой загрузки модели: {e}")
+        print("   >>> Рекомендуется переобучить модель (пункт 1).")
+        return
+
+    # 2. Цикл работы
+    while True:
+        print("\n" + "-" * 50)
+        raw_path = input(">>> Перетащите файл рукописи сюда (или 'q' для выхода): ").strip()
+        image_path = raw_path.replace('"', '').replace("'", "")  # Очистка кавычек
+
+        if image_path.lower() in ['q', 'exit', 'quit']: break
+        if not os.path.exists(image_path):
+            print("[!] Файл не найден.")
+            continue
+
+        try:
+            print("\n   [1/3] Нейросетевой анализ...")
+            results = model.predict(image_path, top_k=3)
+            print(f"\n   --- ВЕРДИКТ НЕЙРОСЕТИ ---")
+            for i, res in enumerate(results, 1):
+                star = "★ " if i == 1 else "  "
+                print(f"   {star} {res['author']:<20} | {res['confidence']:.2f}%")
+
+            print("\n   [2/3] Криминалистический профиль (Computer Vision)...")
+
+            # Уникальное имя отчета
+            base_name = os.path.basename(image_path).split('.')[0]
+            report_name = f"REPORT_{base_name}.png"
+
+            # ГЕНЕРАЦИЯ
+            model.generate_forensic_report(image_path, save_path=report_name)
+
+            print(f"   [ГОТОВО] ✔ Отчет: {report_name}")
+            print("   [3/3] Открытие...")
+            time.sleep(0.5)
+            open_file_auto(report_name)
+
+        except Exception as e:
+            print(f"\n[ОШИБКА] Анализ прерван: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 def main():
-    
-    if len(sys.argv) > 1:
-        # Позволяет запускать скрипт с аргументами, например: python example_usage.py train
-        command = sys.argv[1]
-        if command == "train":
-            run_training()
-        elif command == "predict":
-            run_prediction()
-        else:
-            print(f"[ОШИБКА] Неизвестная команда: {command}. Доступные команды: 'train', 'predict'.")
-        return
-
-    # Интерактивное меню, если скрипт запущен без аргументов
     while True:
         print("\n" + "=" * 60)
-        print("=== Система атрибуции рукописей: Главное меню ===")
+        print("=== ZENITH PRIME HANDWRITING SYSTEM ===")
         print("=" * 60)
-        print("1. Обучить новую модель")
-        print("2. Использовать обученную модель для предсказания")
+        print("1. Обучить модель (Train K-Fold)")
+        print("2. Провести экспертизу (Forensic Report)")
         print("3. Выход")
-        choice = input("Ваш выбор (1-3): ").strip()
 
-        if choice == '1':
+        cmd = input("Ваш выбор > ").strip()
+        if cmd == '1':
             run_training()
-        elif choice == '2':
+        elif cmd == '2':
             run_prediction()
-        elif choice == '3':
-            print("\n[INFO] Завершение работы.")
+        elif cmd == '3':
             break
         else:
-            print("\n[ПРЕДУПРЕЖДЕНИЕ] Неверный выбор. Введите число от 1 до 3.")
-
-        input("\nНажмите Enter для возврата в меню")
+            print("Неверная команда.")
 
 
 if __name__ == "__main__":
