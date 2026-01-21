@@ -19,7 +19,7 @@ from PIL import Image
 import os
 import json
 from collections import Counter
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
@@ -69,7 +69,7 @@ class HandwritingCNN(nn.Module):
             nn.Linear(in_features, 1024),  # Промежуточный слой 1024 нейрона
             nn.BatchNorm1d(1024),  # Стабилизация обучения (важно для ResNet50)
             nn.ReLU(),
-            nn.Dropout(0.5),  # Защита от переобучения
+            nn.Dropout(0.8),  # Защита от переобучения
             nn.Linear(1024, num_classes)
         )
 
@@ -124,18 +124,48 @@ class HandwritingAttribution:
         return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2RGB)
 
     def get_transforms(self):
+        """
+        Сбалансированная аугментация (Medium).
+        Достаточно жесткая, чтобы не учить фон, но мягкая, чтобы сохранить текст.
+        """
         train_t = transforms.Compose([
             transforms.Resize((224, 224)),
-            transforms.RandomRotation(15),
-            transforms.RandomHorizontalFlip(0.1),
+
+            # 1. ГЕОМЕТРИЯ (Помягче)
+            transforms.RandomAffine(
+                degrees=10,  # Было 15. Уменьшили вращение.
+                translate=(0.05, 0.05),  # Было 0.1. Сдвиг меньше, чтобы текст не улетал за край.
+                scale=(0.9, 1.1),  # Было 0.85-1.15. Зум аккуратнее.
+                shear=5  # Было 10. Наклон поменьше.
+            ),
+            # RandomPerspective убрали, он часто мылит текст.
+
+            # 2. ЦВЕТ (Аккуратно)
+            transforms.ColorJitter(
+                brightness=0.2,  # Было 0.4.
+                contrast=0.2,  # Было 0.4. Это сохранит чернила читаемыми.
+                saturation=0.2,  # Было 0.4.
+                hue=0.05
+            ),
+            transforms.RandomGrayscale(p=0.1),  # Оставили 10%
+
+            # 3. Размытие убрали (оно мешает учить четкие штрихи)
+
             transforms.ToTensor(),
+
+            # 4. Random Erasing (Ослабили)
+            # Уменьшили вероятность с 0.2 до 0.1 и размер дырок
+            transforms.RandomErasing(p=0.1, scale=(0.02, 0.10)),
+
             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         ])
+
         val_t = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         ])
+
         return train_t, val_t
 
     def load_dataset(self, data_dir):
@@ -152,72 +182,131 @@ class HandwritingAttribution:
         return np.array(paths), np.array(labels)
 
     # === ОБУЧЕНИЕ ===
-    def train(self, data_dir, k_folds=3, epochs=15, batch_size=4, learning_rate=0.0001):
-        print(f"=== ЗАПУСК ОБУЧЕНИЯ (Metric: F1-Score Macro) ===")
+    def train(self, data_dir, epochs=100, batch_size=16, learning_rate=0.0001):
+        print(f"=== ЗАПУСК ОБУЧЕНИЯ (Hold-Out Split 80/20) ===")
         paths, labels = self.load_dataset(data_dir)
         if len(paths) == 0: raise ValueError("Нет данных!")
 
         self.num_classes = len(self.label_to_author)
         print(f"Изображений: {len(paths)} | Классов: {self.num_classes} | Device: {self.device}")
 
-        skf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=42)
+        # 1. Делим на Train/Val один раз (20% на валидацию)
+        # stratify=labels гарантирует, что в валидации будут примеры каждого автора
+        train_paths, val_paths, train_labels, val_labels = train_test_split(
+            paths, labels, test_size=0.2, random_state=42, stratify=labels
+        )
+
+        print(f"Train: {len(train_paths)} | Val: {len(val_paths)}")
+
+        # 2. Инициализация модели и инструментов
+        self._init_model()
         train_tf, val_tf = self.get_transforms()
+
+        # Оптимизатор с разными скоростями (Дифференциальный LR)
+        optimizer = optim.Adam([
+            # Тело учим со скоростью, которую передали (например, 1e-4)
+            {'params': self.model.backbone.parameters(), 'lr': learning_rate},
+
+            # Голову учим в 10 раз быстрее (так принято при Transfer Learning)
+            {'params': self.model.classifier.parameters(), 'lr': learning_rate * 10}
+        ], weight_decay=1e-4)
+
+        # Планировщик: снижает скорость, если * эпохи нет улучшений
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='max', factor=0.1, patience=5,
+        )
+
+        criterion = nn.CrossEntropyLoss()
+        stopper = EarlyStopping(patience=15)  # Ждем * эпох до остановки
+
+        # 3. Датасеты и Лоадеры
+        train_ds = HandwritingDataset(train_paths, train_labels, train_tf)
+        val_ds = HandwritingDataset(val_paths, val_labels, val_tf)
+
+        # Балансировка классов + ИСКУССТВЕННОЕ УВЕЛИЧЕНИЕ ЭПОХИ
+        class_counts = Counter(train_labels)
+        weights = [1.0 / class_counts[l] for l in train_labels]
+
+        # МАГИЯ ЗДЕСЬ:
+        # Мы говорим семплеру: "Выдай нам в 10 раз больше картинок, чем есть на самом деле"
+        # replacement=True разрешает брать одну картинку много раз за эпоху (но с разной аугментацией!)
+        samples_per_epoch = len(weights) * 10
+
+        sampler = WeightedRandomSampler(weights, num_samples=samples_per_epoch, replacement=True)
+
+        nw = 0 if os.name == 'nt' else 2
+        train_loader = DataLoader(train_ds, batch_size=batch_size, sampler=sampler, num_workers=nw, drop_last=True)
+        val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=nw)
 
         global_best_f1 = 0.0
 
-        for fold, (train_idx, val_idx) in enumerate(skf.split(paths, labels)):
-            print(f"\n--- FOLD {fold + 1}/{k_folds} ---")
-            self._init_model()
-            # Добавлена L2 регуляризация (weight_decay)
-            optimizer = optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=1e-4)
-            criterion = nn.CrossEntropyLoss()
+        # === 4. КРАСИВЫЙ ЦИКЛ ОБУЧЕНИЯ ===
 
-            train_ds = HandwritingDataset(paths[train_idx], labels[train_idx], train_tf)
-            val_ds = HandwritingDataset(paths[val_idx], labels[val_idx], val_tf)
+        # Заголовки таблицы
+        print(f"\n{'EPOCH':^7} | {'TR LOSS':^10} | {'VAL F1':^10} | {'VAL ACC':^10} | {'STATUS':^25}")
+        print("-" * 75)
 
-            class_counts = Counter(labels[train_idx])
-            weights = [1.0 / class_counts[l] for l in labels[train_idx]]
-            sampler = WeightedRandomSampler(weights, len(weights))
+        for ep in range(epochs):
+            self.model.train()
+            train_loss = 0.0
 
-            # Настройка num_workers
-            nw = 0 if os.name == 'nt' else 2  # Безопасный режим для Windows
-            train_loader = DataLoader(train_ds, batch_size=batch_size, sampler=sampler, num_workers=nw, drop_last=True)
-            val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=nw)
+            # leave=False заставляет прогресс-бар исчезать после эпохи, не засоряя лог
+            pbar = tqdm(train_loader, desc=f"Ep {ep + 1}/{epochs}", leave=False)
 
-            stopper = EarlyStopping(patience=5)
+            for img, lbl in pbar:
+                img, lbl = img.to(self.device), lbl.to(self.device)
+                optimizer.zero_grad()
+                out = self.model(img)
+                loss = criterion(out, lbl)
+                loss.backward()
+                optimizer.step()
+                train_loss += loss.item()
 
-            for ep in range(epochs):
-                self.model.train()
-                for img, lbl in tqdm(train_loader, desc=f"Ep {ep + 1}", leave=False):
-                    img, lbl = img.to(self.device), lbl.to(self.device)
-                    optimizer.zero_grad()
-                    loss = criterion(self.model(img), lbl)
-                    loss.backward()
-                    optimizer.step()
+                # Обновляем цифры прямо в прогресс-баре
+                pbar.set_postfix({'loss': f"{loss.item():.4f}"})
 
-                self.model.eval()
-                all_preds, all_labels = [], []
-                with torch.no_grad():
-                    for img, lbl in val_loader:
-                        img = img.to(self.device)
-                        out = self.model(img)
-                        _, pred = torch.max(out, 1)
-                        all_preds.extend(pred.cpu().numpy())
-                        all_labels.extend(lbl.numpy())
+            # Валидация
+            self.model.eval()
+            all_preds, all_labels = [], []
+            with torch.no_grad():
+                for img, lbl in val_loader:
+                    img = img.to(self.device)
+                    out = self.model(img)
+                    _, pred = torch.max(out, 1)
+                    all_preds.extend(pred.cpu().numpy())
+                    all_labels.extend(lbl.numpy())
 
-                val_f1 = f1_score(all_labels, all_preds, average='macro')
-                val_acc = np.mean(np.array(all_preds) == np.array(all_labels))
+            val_f1 = f1_score(all_labels, all_preds, average='macro')
+            val_acc = np.mean(np.array(all_preds) == np.array(all_labels))
+            avg_train_loss = train_loss / len(train_loader)
 
-                if val_f1 > global_best_f1:
-                    global_best_f1 = val_f1
-                    print(f"  >>> NEW BEST F1: {val_f1:.4f} (Acc: {val_acc:.2f}) - Saving...")
-                    self.save_model("handwriting_modelUp_best.pth")
-                    self.save_labels("labelsUp.json")
+            # Логика сохранения и статусов
+            status_msg = ""
+            # Цвета ANSI: \033[92m - зеленый, \033[0m - сброс
+            GREEN = "\033[92m"
+            RESET = "\033[0m"
 
-                stopper(val_f1)
-                if stopper.early_stop: break
+            if val_f1 > global_best_f1:
+                global_best_f1 = val_f1
+                self.save_model("handwriting_modelUp_best.pth")
+                self.save_labels("labelsUp.json")
+                status_msg = f"{GREEN}★ NEW BEST MODEL{RESET}"
 
-        print(f"\n[ИТОГ] Лучший F1-Score (Macro): {global_best_f1:.4f}")
+            # Шаг планировщика
+            scheduler.step(val_f1)
+
+            # Красивый вывод строки таблицы
+            print(f"{ep + 1:^7d} | {avg_train_loss:^10.4f} | {val_f1:^10.4f} | {val_acc:^10.4f} | {status_msg}")
+
+            # Ранняя остановка
+            stopper(val_f1)
+            if stopper.early_stop:
+                print("-" * 75)
+                print(f"🛑 Early Stopping triggered at epoch {ep + 1}")
+                break
+
+        print(f"\n[ИТОГ] Лучший F1-Score: {global_best_f1:.4f}")
+        # Загружаем лучшую модель обратно перед выходом
         try:
             self.load_model("handwriting_modelUp_best.pth")
         except:
